@@ -236,7 +236,7 @@ impl ChainsBuilder {
     }
 
     /// The map, once every record was fed.
-    pub fn finish(mut self) -> Result<DiskChains, ChainsError> {
+    pub fn finish(self) -> Result<DiskChains, ChainsError> {
         if self.seen != self.count {
             return Err(ChainsError::Corrupt(format!(
                 "{} records for {} entries",
