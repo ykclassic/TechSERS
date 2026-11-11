@@ -179,7 +179,7 @@ impl LocateOptions {
 /// [`LocateOptions::idx_cache_bytes`] by default: 1 GiB.
 pub const DEFAULT_IDX_CACHE_BYTES: u64 = 1 << 30;
 
-/// Default process-local budget for sampled lookup copies and chain maps: 1 GiB.
+/// Default per-locator budget for sampled lookup copies and chain maps: 1 GiB.
 pub const DEFAULT_SAMPLED_DISK_BUDGET_BYTES: u64 = 1 << 30;
 
 /// The largest object the base-object cache keeps
@@ -501,7 +501,7 @@ impl<M: PackRows, B: BlobStore> StoredPacks<M, B> {
         self
     }
 
-    /// Sets the process-local budget shared by sampled lookup copies and
+    /// Sets the per-locator budget shared by sampled lookup copies and
     /// chain maps. A zero budget disables both local-file optimizations.
     pub fn with_local_disk_budget(mut self, bytes: u64) -> Self {
         self.local_disk_budget = Arc::new(DiskBudget::new(bytes));
