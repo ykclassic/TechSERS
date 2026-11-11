@@ -126,6 +126,8 @@ pub(crate) struct Tuning {
     /// `ASPEN_IDX_CACHE_BYTES`: `.idx` bytes kept in memory for the push
     /// path's object lookups (`LocateOptions::idx_cache_bytes`).
     pub(crate) idx_cache_bytes: Option<u64>,
+    /// ASPEN_SAMPLED_DISK_BUDGET_BYTES: process-local sampled auxiliary disk budget.
+    pub(crate) sampled_disk_budget_bytes: Option<u64>,
     /// `ASPEN_OBJECT_CACHE_BYTES`: resolved base objects kept in memory
     /// (`LocateOptions::object_cache_bytes`); `0` turns the cache off.
     pub(crate) object_cache_bytes: Option<u64>,
@@ -836,6 +838,9 @@ impl ServeConfig {
         if let Some(b) = t.idx_cache_bytes {
             r.locate.idx_cache_bytes = b;
         }
+        if let Some(b) = t.sampled_disk_budget_bytes {
+            r.sampled_disk_budget_bytes = b;
+        }
         if let Some(b) = t.object_cache_bytes {
             r.locate.object_cache_bytes = b;
         }
@@ -973,6 +978,7 @@ fn tuning(
             optional_in(var, "ASPEN_PREFETCH_PARALLEL_READS", 1, MAX_PARALLEL)?,
         )?,
         idx_cache_bytes: optional_in(var, "ASPEN_IDX_CACHE_BYTES", 1, u64::MAX)?,
+        sampled_disk_budget_bytes: optional_in(var, "ASPEN_SAMPLED_DISK_BUDGET_BYTES", 0, u64::MAX)?,
         object_cache_bytes: optional_in(var, "ASPEN_OBJECT_CACHE_BYTES", 0, u64::MAX)?,
         idx_whole_max_bytes: optional_in(var, "ASPEN_IDX_WHOLE_MAX_BYTES", 0, u64::MAX)?,
         trunk_tree_cache_bytes: optional_in(var, "ASPEN_TRUNK_TREE_CACHE_BYTES", 0, u64::MAX)?,
