@@ -31,6 +31,7 @@ mod base_cache;
 pub mod boundary;
 pub mod chains;
 pub mod changed;
+pub mod disk_budget;
 mod declared;
 pub mod entries;
 pub mod graph;
