@@ -72,7 +72,7 @@ pub struct ReceiveConfig {
     /// `.idx` a lookup reads (`aspen_pack::sampled`, 24 bytes per object)
     /// are kept in `sampled/` under it.
     pub spool_dir: PathBuf,
-    /// Process-local byte budget shared by sampled lookup copies and chain maps.
+    /// Per-locator byte budget shared by sampled lookup copies and chain maps.
     /// This does not account for push-ingest or mirror temporary files.
     pub sampled_disk_budget_bytes: u64,
     /// Object count and pack size limits, checked before and while the
