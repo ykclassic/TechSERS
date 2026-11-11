@@ -504,6 +504,8 @@ impl SampledIdx {
 mod tests {
     use super::*;
     use crate::idx::{IdxEntry, IdxV2, write};
+    use crate::disk_budget::DiskBudget;
+    use std::sync::Arc;
     use aspen_core::id::{PackChecksum, PackId, RepoId, UnixMicros};
     use aspen_core::pack::{NewPack, PackGeneration, PackOrigin};
 
@@ -631,6 +633,46 @@ mod tests {
             0,
             "local copies are unnamed files, gone with their samples"
         );
+    }
+
+    #[test]
+    fn local_copy_respects_budget_and_releases_reservation_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget = Arc::new(DiskBudget::new(1 << 20));
+        let checksum = PackChecksum::from_bytes([7; 20]);
+        let idx = write(entries(2_000, true), &checksum);
+        let rec = record(&idx, 2_000, 1 << 40, checksum);
+        let mut builder = SampleBuilder::new(rec, &idx[..IDS_AT as usize])
+            .unwrap()
+            .copy_to_with_budget(dir.path(), Arc::clone(&budget));
+        for (section, range) in builder.sections(4096) {
+            builder.feed(section, &idx[range.start() as usize..range.end() as usize]).unwrap();
+        }
+        let sample = builder.finish().unwrap();
+        assert!(sample.is_local());
+        assert!(budget.used_bytes() > 0);
+        drop(sample);
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn local_copy_is_skipped_when_budget_is_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget = Arc::new(DiskBudget::new(1));
+        let checksum = PackChecksum::from_bytes([7; 20]);
+        let idx = write(entries(2_000, true), &checksum);
+        let rec = record(&idx, 2_000, 1 << 40, checksum);
+        let mut builder = SampleBuilder::new(rec, &idx[..IDS_AT as usize])
+            .unwrap()
+            .copy_to_with_budget(dir.path(), Arc::clone(&budget));
+        for (section, range) in builder.sections(4096) {
+            builder.feed(section, &idx[range.start() as usize..range.end() as usize]).unwrap();
+        }
+        let sample = builder.finish().unwrap();
+        assert!(!sample.is_local());
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     /// Invariant: building a sample refuses everything a whole parse
