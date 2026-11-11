@@ -126,7 +126,7 @@ pub(crate) struct Tuning {
     /// `ASPEN_IDX_CACHE_BYTES`: `.idx` bytes kept in memory for the push
     /// path's object lookups (`LocateOptions::idx_cache_bytes`).
     pub(crate) idx_cache_bytes: Option<u64>,
-    /// ASPEN_SAMPLED_DISK_BUDGET_BYTES: process-local sampled auxiliary disk budget.
+    /// ASPEN_SAMPLED_DISK_BUDGET_BYTES: per-locator sampled auxiliary disk budget.
     pub(crate) sampled_disk_budget_bytes: Option<u64>,
     /// `ASPEN_OBJECT_CACHE_BYTES`: resolved base objects kept in memory
     /// (`LocateOptions::object_cache_bytes`); `0` turns the cache off.
