@@ -252,3 +252,62 @@ impl ChainsBuilder {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::disk_budget::DiskBudget;
+    use std::sync::Arc;
+    use aspen_core::id::{PackChecksum, PackId, RepoId, UnixMicros};
+    use aspen_core::pack::{NewPack, PackGeneration, PackOrigin};
+
+    fn row() -> PackRecord {
+        PackRecord {
+            id: PackId::new(1).unwrap(),
+            generation: PackGeneration::FIRST,
+            created_at: UnixMicros(0),
+            pack: NewPack {
+                repo: RepoId::new(1).unwrap(),
+                checksum: PackChecksum::from_bytes([7; 20]),
+                size: 64,
+                idx_size: 0,
+                entries_size: (ENTRY_TABLE_HEADER_LEN + ENTRY_RECORD_LEN) as u64,
+                object_count: 1,
+                ref_delta_count: 0,
+                origin: PackOrigin::Push { received_bytes: 0 },
+            },
+        }
+    }
+
+    fn header(row: &PackRecord) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(ENTRY_TABLE_HEADER_LEN);
+        bytes.extend_from_slice(&ENTRY_TABLE_MAGIC);
+        bytes.extend_from_slice(&ENTRY_TABLE_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&row.pack.object_count.to_be_bytes());
+        bytes.extend_from_slice(&row.pack.size.to_be_bytes());
+        bytes.extend_from_slice(row.pack.checksum.as_bytes());
+        bytes
+    }
+
+    #[test]
+    fn chain_map_reserves_exact_size_before_creating_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let row = row();
+        let header = header(&row);
+        let denied = Arc::new(DiskBudget::new(15));
+        assert!(matches!(
+            ChainsBuilder::new_with_budget(dir.path(), &row, &header, Arc::clone(&denied)),
+            Err(ChainsError::BudgetExceeded)
+        ));
+        assert_eq!(denied.used_bytes(), 0);
+
+        let admitted = Arc::new(DiskBudget::new(16));
+        let builder = ChainsBuilder::new_with_budget(
+            dir.path(), &row, &header, Arc::clone(&admitted),
+        ).unwrap();
+        assert_eq!(admitted.used_bytes(), 16);
+        drop(builder);
+        assert_eq!(admitted.used_bytes(), 0);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+}
