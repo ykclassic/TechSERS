@@ -25,7 +25,9 @@
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use crate::disk_budget::{DiskBudget, DiskReservation};
 
 use aspen_core::pack::{
     ENTRY_RECORD_LEN, ENTRY_TABLE_HEADER_LEN, ENTRY_TABLE_MAGIC, ENTRY_TABLE_VERSION,
@@ -47,6 +49,7 @@ const UNPLACED: u64 = u64::MAX - 1;
 #[derive(Debug)]
 pub struct DiskChains {
     file: Mutex<File>,
+    _reservation: DiskReservation,
     count: u64,
     /// The offset of the first entry of every block.
     firsts: Vec<u64>,
@@ -117,12 +120,16 @@ pub enum ChainsError {
     /// Writing the local file failed.
     #[error("chain map file: {0}")]
     Io(#[from] std::io::Error),
+    /// The sampled-spool disk budget could not admit this map.
+    #[error("sampled spool disk budget exceeded")]
+    BudgetExceeded,
 }
 
 /// Builds a [`DiskChains`] from a pack's entry table, fed in order.
 #[derive(Debug)]
 pub struct ChainsBuilder {
     file: BufWriter<File>,
+    reservation: DiskReservation,
     count: u64,
     seen: u64,
     last: Option<u64>,
@@ -145,6 +152,16 @@ impl ChainsBuilder {
     /// Starts a map in a new file in `dir` (deleted when the map is
     /// dropped), checking the table's `header` against the pack's `row`.
     pub fn new(dir: &Path, row: &PackRecord, header: &[u8]) -> Result<Self, ChainsError> {
+        Self::new_with_budget(dir, row, header, Arc::new(DiskBudget::new(u64::MAX)))
+    }
+
+    /// Starts a map only after reserving its complete on-disk size.
+    pub fn new_with_budget(
+        dir: &Path,
+        row: &PackRecord,
+        header: &[u8],
+        budget: Arc<DiskBudget>,
+    ) -> Result<Self, ChainsError> {
         let count = u64::from(row.pack.object_count);
         if header.len() != ENTRY_TABLE_HEADER_LEN
             || header[..8] != ENTRY_TABLE_MAGIC
@@ -157,9 +174,13 @@ impl ChainsBuilder {
         {
             return Err(ChainsError::Corrupt("does not describe this pack".into()));
         }
+        let bytes = count.checked_mul(RECORD as u64).ok_or(ChainsError::BudgetExceeded)?;
+        let reservation = budget.try_reserve(bytes).ok_or(ChainsError::BudgetExceeded)?;
         std::fs::create_dir_all(dir)?;
+        let file = tempfile::tempfile_in(dir)?;
         Ok(Self {
-            file: BufWriter::with_capacity(1 << 16, tempfile::tempfile_in(dir)?),
+            file: BufWriter::with_capacity(1 << 16, file),
+            reservation,
             count,
             seen: 0,
             last: None,
@@ -215,7 +236,7 @@ impl ChainsBuilder {
     }
 
     /// The map, once every record was fed.
-    pub fn finish(self) -> Result<DiskChains, ChainsError> {
+    pub fn finish(mut self) -> Result<DiskChains, ChainsError> {
         if self.seen != self.count {
             return Err(ChainsError::Corrupt(format!(
                 "{} records for {} entries",
@@ -225,6 +246,7 @@ impl ChainsBuilder {
         let file = self.file.into_inner().map_err(|e| e.into_error())?;
         Ok(DiskChains {
             file: Mutex::new(file),
+            _reservation: self.reservation,
             count: self.count,
             firsts: self.firsts,
         })
