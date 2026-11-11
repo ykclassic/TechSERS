@@ -1,8 +1,8 @@
-//! A process-local byte budget for auxiliary sampled-pack files on the spool.
+//! A per-locator byte budget for auxiliary sampled-pack files on the spool.
 //!
 //! Reservations are acquired before a temporary file is created and live
 //! exactly as long as the file owner. This bounds sampled auxiliary files
-//! across concurrent index loads within one process; it is not a filesystem
+//! across concurrent index loads within one locator; it is not a filesystem
 //! quota and does not account for push-ingest or mirror temporary files.
 
 use std::sync::Arc;
