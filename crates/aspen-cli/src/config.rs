@@ -126,6 +126,8 @@ pub(crate) struct Tuning {
     /// `ASPEN_IDX_CACHE_BYTES`: `.idx` bytes kept in memory for the push
     /// path's object lookups (`LocateOptions::idx_cache_bytes`).
     pub(crate) idx_cache_bytes: Option<u64>,
+    /// ASPEN_SAMPLED_DISK_BUDGET_BYTES: per-locator sampled auxiliary disk budget.
+    pub(crate) sampled_disk_budget_bytes: Option<u64>,
     /// `ASPEN_OBJECT_CACHE_BYTES`: resolved base objects kept in memory
     /// (`LocateOptions::object_cache_bytes`); `0` turns the cache off.
     pub(crate) object_cache_bytes: Option<u64>,
@@ -836,6 +838,9 @@ impl ServeConfig {
         if let Some(b) = t.idx_cache_bytes {
             r.locate.idx_cache_bytes = b;
         }
+        if let Some(b) = t.sampled_disk_budget_bytes {
+            r.sampled_disk_budget_bytes = b;
+        }
         if let Some(b) = t.object_cache_bytes {
             r.locate.object_cache_bytes = b;
         }
@@ -973,6 +978,12 @@ fn tuning(
             optional_in(var, "ASPEN_PREFETCH_PARALLEL_READS", 1, MAX_PARALLEL)?,
         )?,
         idx_cache_bytes: optional_in(var, "ASPEN_IDX_CACHE_BYTES", 1, u64::MAX)?,
+        sampled_disk_budget_bytes: optional_in(
+            var,
+            "ASPEN_SAMPLED_DISK_BUDGET_BYTES",
+            0,
+            u64::MAX,
+        )?,
         object_cache_bytes: optional_in(var, "ASPEN_OBJECT_CACHE_BYTES", 0, u64::MAX)?,
         idx_whole_max_bytes: optional_in(var, "ASPEN_IDX_WHOLE_MAX_BYTES", 0, u64::MAX)?,
         trunk_tree_cache_bytes: optional_in(var, "ASPEN_TRUNK_TREE_CACHE_BYTES", 0, u64::MAX)?,
@@ -1885,6 +1896,7 @@ mod tests {
         ("ASPEN_PREFETCH_PARALLEL_READS", Some("256"), "128", &["0", "1025"]),
         ("ASPEN_MEMORY_HIGH_WATER_BYTES", None, "0", &["x", "-1", "12GiB"]),
         ("ASPEN_IDX_CACHE_BYTES", Some("1073741824"), "268435456", &["0", "1GiB"]),
+        ("ASPEN_SAMPLED_DISK_BUDGET_BYTES", Some("1073741824"), "536870912", &["-1"]),
         ("ASPEN_OBJECT_CACHE_BYTES", Some("67108864"), "0", &["x", "-1"]),
         ("ASPEN_IDX_WHOLE_MAX_BYTES", Some("67108864"), "0", &["x", "-1"]),
         ("ASPEN_TRUNK_TREE_CACHE_BYTES", Some("67108864"), "0", &["64MiB", "-1"]),
@@ -2036,6 +2048,7 @@ mod tests {
             ("ASPEN_PREFETCH_WAIT_SECS", "5"),
             ("ASPEN_PREFETCH_PARALLEL_READS", "128"),
             ("ASPEN_IDX_CACHE_BYTES", "268435456"),
+            ("ASPEN_SAMPLED_DISK_BUDGET_BYTES", "536870912"),
             ("ASPEN_MEMORY_HIGH_WATER_BYTES", "4294967296"),
             ("ASPEN_OBJECT_CACHE_BYTES", "0"),
             ("ASPEN_IDX_WHOLE_MAX_BYTES", "1048576"),
@@ -2062,6 +2075,7 @@ mod tests {
         assert_eq!(r.prefetch_wait, Duration::from_secs(5));
         assert_eq!(r.locate.max_parallel_reads, 128);
         assert_eq!(r.locate.idx_cache_bytes, 256 << 20);
+        assert_eq!(r.sampled_disk_budget_bytes, 512 << 20);
         assert_eq!(c.instance.memory_high_water, Some(4 << 30));
         assert_eq!(r.locate.object_cache_bytes, 0);
         assert_eq!(r.locate.max_whole_idx_bytes, 1 << 20);

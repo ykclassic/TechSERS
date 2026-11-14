@@ -74,6 +74,7 @@ use aspen_core::pack::{PACK_HEADER_LEN, PACK_TRAILER_LEN, PackRecord};
 
 use crate::MaxObjectBytes;
 use crate::chains::{ChainsBuilder, ChainsError, DiskChains};
+use crate::disk_budget::DiskBudget;
 use crate::header::{self, RawBase};
 use crate::idx::IdxV2;
 use crate::sampled::{SampleBuilder, SampledIdx};
@@ -177,6 +178,9 @@ impl LocateOptions {
 
 /// [`LocateOptions::idx_cache_bytes`] by default: 1 GiB.
 pub const DEFAULT_IDX_CACHE_BYTES: u64 = 1 << 30;
+
+/// Default per-locator budget for sampled lookup copies and chain maps: 1 GiB.
+pub const DEFAULT_SAMPLED_DISK_BUDGET_BYTES: u64 = 1 << 30;
 
 /// The largest object the base-object cache keeps
 /// ([`LocateOptions::object_cache_bytes`]).
@@ -460,6 +464,8 @@ pub struct StoredPacks<M, B> {
     /// Where sampled packs' chain maps (`crate::chains`) and lookup
     /// sections (`crate::sampled`) are kept; `None` keeps neither.
     local_dir: Option<std::path::PathBuf>,
+    /// Shared reservation budget for sampled lookup sections and chain maps.
+    local_disk_budget: Arc<DiskBudget>,
 }
 
 /// A resolved base object in the base-object cache.
@@ -479,6 +485,7 @@ impl<M: PackRows, B: BlobStore> StoredPacks<M, B> {
             object_misses: Default::default(),
             counters: Counters::default(),
             local_dir: None,
+            local_disk_budget: Arc::new(DiskBudget::new(DEFAULT_SAMPLED_DISK_BUDGET_BYTES)),
         }
     }
 
@@ -492,6 +499,18 @@ impl<M: PackRows, B: BlobStore> StoredPacks<M, B> {
     pub fn with_local_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.local_dir = Some(dir.into());
         self
+    }
+
+    /// Sets the per-locator budget shared by sampled lookup copies and
+    /// chain maps. A zero budget disables both local-file optimizations.
+    pub fn with_local_disk_budget(mut self, bytes: u64) -> Self {
+        self.local_disk_budget = Arc::new(DiskBudget::new(bytes));
+        self
+    }
+
+    /// Current sampled auxiliary bytes reserved by this locator.
+    pub fn local_disk_used_bytes(&self) -> u64 {
+        self.local_disk_budget.used_bytes()
     }
 
     /// What this locator has read and looked up so far.
@@ -703,7 +722,7 @@ impl<M: PackRows, B: BlobStore> StoredPacks<M, B> {
         let head = self.read_idx(&key, SampledIdx::head_range()).await?;
         let mut builder = SampleBuilder::new(row.clone(), &head).map_err(|e| corrupt(&row, e.0))?;
         if let Some(dir) = dir {
-            builder = builder.copy_to(dir);
+            builder = builder.copy_to_with_budget(dir, Arc::clone(&self.local_disk_budget));
         }
         let sections = builder.sections(SAMPLE_READ_ENTRIES);
         for group in sections.chunks(8) {
@@ -742,10 +761,12 @@ impl<M: PackRows, B: BlobStore> StoredPacks<M, B> {
         };
         let fail = |e: ChainsError| match e {
             ChainsError::Corrupt(what) => Err(corrupt(row, what)),
-            ChainsError::Io(_) => Ok(None),
+            ChainsError::Io(_) | ChainsError::BudgetExceeded => Ok(None),
         };
         let header = read(ChainsBuilder::header_range()).await?;
-        let mut builder = match ChainsBuilder::new(dir, row, &header) {
+        let mut builder = match ChainsBuilder::new_with_budget(
+            dir, row, &header, Arc::clone(&self.local_disk_budget),
+        ) {
             Ok(b) => b,
             Err(e) => return fail(e),
         };

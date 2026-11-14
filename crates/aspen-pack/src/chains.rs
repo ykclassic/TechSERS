@@ -25,7 +25,9 @@
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use crate::disk_budget::{DiskBudget, DiskReservation};
 
 use aspen_core::pack::{
     ENTRY_RECORD_LEN, ENTRY_TABLE_HEADER_LEN, ENTRY_TABLE_MAGIC, ENTRY_TABLE_VERSION,
@@ -47,6 +49,7 @@ const UNPLACED: u64 = u64::MAX - 1;
 #[derive(Debug)]
 pub struct DiskChains {
     file: Mutex<File>,
+    _reservation: DiskReservation,
     count: u64,
     /// The offset of the first entry of every block.
     firsts: Vec<u64>,
@@ -117,12 +120,16 @@ pub enum ChainsError {
     /// Writing the local file failed.
     #[error("chain map file: {0}")]
     Io(#[from] std::io::Error),
+    /// The sampled-spool disk budget could not admit this map.
+    #[error("sampled spool disk budget exceeded")]
+    BudgetExceeded,
 }
 
 /// Builds a [`DiskChains`] from a pack's entry table, fed in order.
 #[derive(Debug)]
 pub struct ChainsBuilder {
     file: BufWriter<File>,
+    reservation: DiskReservation,
     count: u64,
     seen: u64,
     last: Option<u64>,
@@ -145,6 +152,16 @@ impl ChainsBuilder {
     /// Starts a map in a new file in `dir` (deleted when the map is
     /// dropped), checking the table's `header` against the pack's `row`.
     pub fn new(dir: &Path, row: &PackRecord, header: &[u8]) -> Result<Self, ChainsError> {
+        Self::new_with_budget(dir, row, header, Arc::new(DiskBudget::new(u64::MAX)))
+    }
+
+    /// Starts a map only after reserving its complete on-disk size.
+    pub fn new_with_budget(
+        dir: &Path,
+        row: &PackRecord,
+        header: &[u8],
+        budget: Arc<DiskBudget>,
+    ) -> Result<Self, ChainsError> {
         let count = u64::from(row.pack.object_count);
         if header.len() != ENTRY_TABLE_HEADER_LEN
             || header[..8] != ENTRY_TABLE_MAGIC
@@ -157,9 +174,13 @@ impl ChainsBuilder {
         {
             return Err(ChainsError::Corrupt("does not describe this pack".into()));
         }
+        let bytes = count.checked_mul(RECORD as u64).ok_or(ChainsError::BudgetExceeded)?;
+        let reservation = budget.try_reserve(bytes).ok_or(ChainsError::BudgetExceeded)?;
         std::fs::create_dir_all(dir)?;
+        let file = tempfile::tempfile_in(dir)?;
         Ok(Self {
-            file: BufWriter::with_capacity(1 << 16, tempfile::tempfile_in(dir)?),
+            file: BufWriter::with_capacity(1 << 16, file),
+            reservation,
             count,
             seen: 0,
             last: None,
@@ -225,8 +246,84 @@ impl ChainsBuilder {
         let file = self.file.into_inner().map_err(|e| e.into_error())?;
         Ok(DiskChains {
             file: Mutex::new(file),
+            _reservation: self.reservation,
             count: self.count,
             firsts: self.firsts,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::disk_budget::DiskBudget;
+    use std::sync::Arc;
+    use aspen_core::id::{PackChecksum, PackId, RepoId, UnixMicros};
+    use aspen_core::pack::{NewPack, PackGeneration, PackOrigin};
+
+    fn row() -> PackRecord {
+        PackRecord {
+            id: PackId::new(1).unwrap(),
+            generation: PackGeneration::FIRST,
+            created_at: UnixMicros(0),
+            pack: NewPack {
+                repo: RepoId::new(1).unwrap(),
+                checksum: PackChecksum::from_bytes([7; 20]),
+                size: 64,
+                idx_size: 0,
+                entries_size: (ENTRY_TABLE_HEADER_LEN + ENTRY_RECORD_LEN) as u64,
+                object_count: 1,
+                ref_delta_count: 0,
+                origin: PackOrigin::Push { received_bytes: 0 },
+            },
+        }
+    }
+
+    fn header(row: &PackRecord) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(ENTRY_TABLE_HEADER_LEN);
+        bytes.extend_from_slice(&ENTRY_TABLE_MAGIC);
+        bytes.extend_from_slice(&ENTRY_TABLE_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&row.pack.object_count.to_be_bytes());
+        bytes.extend_from_slice(&row.pack.size.to_be_bytes());
+        bytes.extend_from_slice(row.pack.checksum.as_bytes());
+        bytes
+    }
+
+    #[test]
+    fn chain_map_creation_failure_releases_reservation() {
+        let root = tempfile::tempdir().unwrap();
+        let not_a_directory = root.path().join("regular-file");
+        std::fs::write(&not_a_directory, b"occupied").unwrap();
+        let row = row();
+        let header = header(&row);
+        let budget = Arc::new(DiskBudget::new(16));
+        let result = ChainsBuilder::new_with_budget(
+            &not_a_directory, &row, &header, Arc::clone(&budget),
+        );
+        assert!(matches!(result, Err(ChainsError::Io(_))));
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(std::fs::read(&not_a_directory).unwrap(), b"occupied");
+    }
+
+    #[test]
+    fn chain_map_reserves_exact_size_before_creating_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let row = row();
+        let header = header(&row);
+        let denied = Arc::new(DiskBudget::new(15));
+        assert!(matches!(
+            ChainsBuilder::new_with_budget(dir.path(), &row, &header, Arc::clone(&denied)),
+            Err(ChainsError::BudgetExceeded)
+        ));
+        assert_eq!(denied.used_bytes(), 0);
+
+        let admitted = Arc::new(DiskBudget::new(16));
+        let builder = ChainsBuilder::new_with_budget(
+            dir.path(), &row, &header, Arc::clone(&admitted),
+        ).unwrap();
+        assert_eq!(admitted.used_bytes(), 16);
+        drop(builder);
+        assert_eq!(admitted.used_bytes(), 0);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

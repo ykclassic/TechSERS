@@ -72,6 +72,9 @@ pub struct ReceiveConfig {
     /// `.idx` a lookup reads (`aspen_pack::sampled`, 24 bytes per object)
     /// are kept in `sampled/` under it.
     pub spool_dir: PathBuf,
+    /// Per-locator byte budget shared by sampled lookup copies and chain maps.
+    /// This does not account for push-ingest or mirror temporary files.
+    pub sampled_disk_budget_bytes: u64,
     /// Object count and pack size limits, checked before and while the
     /// pack body is read.
     pub push_limits: PushLimits,
@@ -154,6 +157,7 @@ impl ReceiveConfig {
     ) -> Self {
         Self {
             spool_dir: spool_dir.into(),
+            sampled_disk_budget_bytes: aspen_pack::locate::DEFAULT_SAMPLED_DISK_BUDGET_BYTES,
             push_limits: PushLimits {
                 max_objects: 10_000_000,
                 max_pack_bytes: 8 << 30,
@@ -301,6 +305,7 @@ where
         // the sections of their `.idx` a lookup reads, so a lookup in one
         // reads no blob store (12b).
         let packs = StoredPacks::new(meta.clone(), blobs.clone(), config.locate)
+            .with_local_disk_budget(config.sampled_disk_budget_bytes)
             .with_local_dir(config.spool_dir.join("sampled"));
         let group = config
             .group_commit

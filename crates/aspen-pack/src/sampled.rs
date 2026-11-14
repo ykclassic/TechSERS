@@ -33,7 +33,9 @@
 use std::fs::File;
 use std::io::{BufWriter, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use crate::disk_budget::{DiskBudget, DiskReservation};
 
 use aspen_core::blob::ByteRange;
 use aspen_core::id::{ObjectId, SHA1_LEN};
@@ -94,6 +96,7 @@ pub struct SampledIdx {
 #[derive(Debug)]
 struct LocalSections {
     file: Mutex<File>,
+    _reservation: DiskReservation,
 }
 
 /// Builds a [`SampledIdx`] from an `.idx` fed in file order.
@@ -113,6 +116,7 @@ pub struct SampleBuilder {
     /// The local copy being written ([`SampleBuilder::copy_to`]); dropped,
     /// and the sample kept without one, if a write fails.
     local: Option<BufWriter<File>>,
+    local_reservation: Option<DiskReservation>,
 }
 
 impl SampleBuilder {
@@ -162,6 +166,7 @@ impl SampleBuilder {
                 Section::Ids(0, 0)
             },
             local: None,
+            local_reservation: None,
         })
     }
 
@@ -170,11 +175,26 @@ impl SampleBuilder {
     /// disk instead of the blob store (module docs). If the file cannot be
     /// made or written, the sample is built without a copy.
     #[must_use]
-    pub fn copy_to(mut self, dir: &Path) -> Self {
+    pub fn copy_to(self, dir: &Path) -> Self {
+        self.copy_to_with_budget(dir, Arc::new(DiskBudget::new(u64::MAX)))
+    }
+
+    /// Copies lookup sections only when their complete size can be reserved
+    /// from the shared sampled-spool budget.
+    #[must_use]
+    pub fn copy_to_with_budget(mut self, dir: &Path, budget: Arc<DiskBudget>) -> Self {
+        let bytes = u64::from(self.record.pack.object_count)
+            .checked_mul(24)
+            .and_then(|n| n.checked_add(self.large_count.checked_mul(8)?));
+        let Some(bytes) = bytes else { return self };
+        let Some(reservation) = budget.try_reserve(bytes) else { return self };
         self.local = std::fs::create_dir_all(dir)
             .and_then(|()| tempfile::tempfile_in(dir))
             .ok()
             .map(|f| BufWriter::with_capacity(1 << 16, f));
+        if self.local.is_some() {
+            self.local_reservation = Some(reservation);
+        }
         self
     }
 
@@ -184,6 +204,7 @@ impl SampleBuilder {
             && w.write_all(bytes).is_err()
         {
             self.local = None;
+            self.local_reservation = None;
         }
     }
 
@@ -324,16 +345,16 @@ impl SampleBuilder {
     }
 
     /// The sample, once the trailer has been fed.
-    pub fn finish(self) -> Result<SampledIdx, IdxError> {
+    pub fn finish(mut self) -> Result<SampledIdx, IdxError> {
         if self.expect != Section::Trailer {
             return Err(bad("the index ended early"));
         }
         // The trailer's checksum covered every byte copied.
-        let local = self
-            .local
+        let local = self.local.take()
             .and_then(|w| w.into_inner().ok())
             .map(|file| LocalSections {
                 file: Mutex::new(file),
+                _reservation: self.local_reservation.take().expect("local file has a reservation"),
             });
         Ok(SampledIdx {
             record: self.record,
@@ -483,6 +504,8 @@ impl SampledIdx {
 mod tests {
     use super::*;
     use crate::idx::{IdxEntry, IdxV2, write};
+    use crate::disk_budget::DiskBudget;
+    use std::sync::Arc;
     use aspen_core::id::{PackChecksum, PackId, RepoId, UnixMicros};
     use aspen_core::pack::{NewPack, PackGeneration, PackOrigin};
 
@@ -610,6 +633,68 @@ mod tests {
             0,
             "local copies are unnamed files, gone with their samples"
         );
+    }
+
+    #[test]
+    fn local_copy_respects_budget_and_releases_reservation_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget = Arc::new(DiskBudget::new(1 << 20));
+        let checksum = PackChecksum::from_bytes([7; 20]);
+        let idx = write(entries(2_000, true), &checksum);
+        let rec = record(&idx, 2_000, 1 << 40, checksum);
+        let mut builder = SampleBuilder::new(rec, &idx[..IDS_AT as usize])
+            .unwrap()
+            .copy_to_with_budget(dir.path(), Arc::clone(&budget));
+        for (section, range) in builder.sections(4096) {
+            builder.feed(section, &idx[range.start() as usize..range.end() as usize]).unwrap();
+        }
+        let sample = builder.finish().unwrap();
+        assert!(sample.is_local());
+        assert!(budget.used_bytes() > 0);
+        drop(sample);
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn local_copy_creation_failure_releases_reservation() {
+        let root = tempfile::tempdir().unwrap();
+        let not_a_directory = root.path().join("regular-file");
+        std::fs::write(&not_a_directory, b"occupied").unwrap();
+        let budget = Arc::new(DiskBudget::new(1 << 20));
+        let checksum = PackChecksum::from_bytes([7; 20]);
+        let idx = write(entries(2_000, true), &checksum);
+        let rec = record(&idx, 2_000, 1 << 40, checksum);
+        let mut builder = SampleBuilder::new(rec, &idx[..IDS_AT as usize])
+            .unwrap()
+            .copy_to_with_budget(&not_a_directory, Arc::clone(&budget));
+        assert_eq!(budget.used_bytes(), 0);
+        for (section, range) in builder.sections(4096) {
+            builder.feed(section, &idx[range.start() as usize..range.end() as usize]).unwrap();
+        }
+        let sample = builder.finish().unwrap();
+        assert!(!sample.is_local());
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(std::fs::read(&not_a_directory).unwrap(), b"occupied");
+    }
+
+    #[test]
+    fn local_copy_is_skipped_when_budget_is_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget = Arc::new(DiskBudget::new(1));
+        let checksum = PackChecksum::from_bytes([7; 20]);
+        let idx = write(entries(2_000, true), &checksum);
+        let rec = record(&idx, 2_000, 1 << 40, checksum);
+        let mut builder = SampleBuilder::new(rec, &idx[..IDS_AT as usize])
+            .unwrap()
+            .copy_to_with_budget(dir.path(), Arc::clone(&budget));
+        for (section, range) in builder.sections(4096) {
+            builder.feed(section, &idx[range.start() as usize..range.end() as usize]).unwrap();
+        }
+        let sample = builder.finish().unwrap();
+        assert!(!sample.is_local());
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     /// Invariant: building a sample refuses everything a whole parse
