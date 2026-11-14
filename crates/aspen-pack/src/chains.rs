@@ -290,6 +290,22 @@ mod tests {
     }
 
     #[test]
+    fn chain_map_creation_failure_releases_reservation() {
+        let root = tempfile::tempdir().unwrap();
+        let not_a_directory = root.path().join("regular-file");
+        std::fs::write(&not_a_directory, b"occupied").unwrap();
+        let row = row();
+        let header = header(&row);
+        let budget = Arc::new(DiskBudget::new(16));
+        let result = ChainsBuilder::new_with_budget(
+            &not_a_directory, &row, &header, Arc::clone(&budget),
+        );
+        assert!(matches!(result, Err(ChainsError::Io(_))));
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(std::fs::read(&not_a_directory).unwrap(), b"occupied");
+    }
+
+    #[test]
     fn chain_map_reserves_exact_size_before_creating_file() {
         let dir = tempfile::tempdir().unwrap();
         let row = row();
