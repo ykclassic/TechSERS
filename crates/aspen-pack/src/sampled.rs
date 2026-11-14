@@ -657,6 +657,28 @@ mod tests {
     }
 
     #[test]
+    fn local_copy_creation_failure_releases_reservation() {
+        let root = tempfile::tempdir().unwrap();
+        let not_a_directory = root.path().join("regular-file");
+        std::fs::write(&not_a_directory, b"occupied").unwrap();
+        let budget = Arc::new(DiskBudget::new(1 << 20));
+        let checksum = PackChecksum::from_bytes([7; 20]);
+        let idx = write(entries(2_000, true), &checksum);
+        let rec = record(&idx, 2_000, 1 << 40, checksum);
+        let mut builder = SampleBuilder::new(rec, &idx[..IDS_AT as usize])
+            .unwrap()
+            .copy_to_with_budget(&not_a_directory, Arc::clone(&budget));
+        assert_eq!(budget.used_bytes(), 0);
+        for (section, range) in builder.sections(4096) {
+            builder.feed(section, &idx[range.start() as usize..range.end() as usize]).unwrap();
+        }
+        let sample = builder.finish().unwrap();
+        assert!(!sample.is_local());
+        assert_eq!(budget.used_bytes(), 0);
+        assert_eq!(std::fs::read(&not_a_directory).unwrap(), b"occupied");
+    }
+
+    #[test]
     fn local_copy_is_skipped_when_budget_is_exhausted() {
         let dir = tempfile::tempdir().unwrap();
         let budget = Arc::new(DiskBudget::new(1));
