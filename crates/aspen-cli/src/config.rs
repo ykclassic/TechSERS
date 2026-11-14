@@ -978,7 +978,12 @@ fn tuning(
             optional_in(var, "ASPEN_PREFETCH_PARALLEL_READS", 1, MAX_PARALLEL)?,
         )?,
         idx_cache_bytes: optional_in(var, "ASPEN_IDX_CACHE_BYTES", 1, u64::MAX)?,
-        sampled_disk_budget_bytes: optional_in(var, "ASPEN_SAMPLED_DISK_BUDGET_BYTES", 0, u64::MAX)?,
+        sampled_disk_budget_bytes: optional_in(
+            var,
+            "ASPEN_SAMPLED_DISK_BUDGET_BYTES",
+            0,
+            u64::MAX,
+        )?,
         object_cache_bytes: optional_in(var, "ASPEN_OBJECT_CACHE_BYTES", 0, u64::MAX)?,
         idx_whole_max_bytes: optional_in(var, "ASPEN_IDX_WHOLE_MAX_BYTES", 0, u64::MAX)?,
         trunk_tree_cache_bytes: optional_in(var, "ASPEN_TRUNK_TREE_CACHE_BYTES", 0, u64::MAX)?,
